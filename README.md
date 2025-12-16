@@ -6,10 +6,11 @@ fish game demo. create with Google Gemini 3
 HTML5 CanvasとJavaScriptで構築された、深海を舞台にしたインタラクティブな生態系シミュレーションです。
 Boids（ボイド）アルゴリズムを用いた小魚の群れと、それを追う巨大な捕食者（ボス）の挙動を再現しています。
 
-## 🎮 スクリーンショット
+## 🎮 デモ
 
 <img width="1493" height="776" alt="image" src="https://github.com/user-attachments/assets/ffb25c8b-631f-4626-8bc1-f20381299cd8" />
 
+Play!🐋 -> https://shironagasu-ai.github.io/gemini3-fish-game/index.html
 
 ## ✨ 特徴
 
