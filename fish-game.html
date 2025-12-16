@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep Sea Predator Simulation (Fixed)</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000; /* グラデーションによる縞模様を防ぐため一旦黒一色に */
+            background: radial-gradient(circle at center, #1a2a40 0%, #000000 100%); /* より自然な深海グラデーション */
+        }
+        canvas {
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.9);
+            font-family: 'Segoe UI', sans-serif;
+            pointer-events: none;
+            user-select: none;
+            z-index: 10;
+        }
+        .stat-item {
+            font-size: 1rem;
+            margin-top: 5px;
+            text-shadow: 0 0 4px #000;
+        }
+        .highlight {
+            color: #ff4d4d;
+            font-weight: bold;
+        }
+        #restart-container {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            display: none;
+            z-index: 20;
+        }
+        #restart-btn {
+            background: rgba(0,0,0,0.6);
+            color: white;
+            border: 2px solid white;
+            padding: 15px 40px;
+            font-size: 1.5rem;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            transition: 0.3s;
+        }
+        #restart-btn:hover {
+            background: white;
+            color: black;
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+        }
+        #game-over-text {
+            color: white;
+            font-size: 2.5rem;
+            margin-bottom: 20px;
+            font-family: sans-serif;
+            text-shadow: 0 0 10px rgba(255,255,255,0.5);
+        }
+    </style>
+</head>
+<body>
+    <div id="ui-layer">
+        <h1 style="margin:0; font-size:1.2rem; letter-spacing:0.05em;">Deep Sea Simulation</h1>
+        <div class="stat-item">小魚の数: <span id="fish-count" class="highlight">0</span></div>
+        <div class="stat-item">ボスの大きさ: <span id="boss-size" class="highlight">0</span></div>
+    </div>
+
+    <div id="restart-container">
+        <div id="game-over-text">ALL FISH EATEN</div>
+        <button id="restart-btn">RESTART</button>
+    </div>
+
+    <canvas id="world"></canvas>
+
+<script>
+// プログラム全体を即時実行関数で囲まず、読み込み完了を待つ構造にする
+
+/**
+ * ベクトル計算クラス
+ */
+class Vector {
+    constructor(x, y) {
+        this.x = x || 0;
+        this.y = y || 0;
+    }
+    add(v) { return new Vector(this.x + v.x, this.y + v.y); }
+    sub(v) { return new Vector(this.x - v.x, this.y - v.y); }
+    mult(n) { return new Vector(this.x * n, this.y * n); }
+    div(n) { return new Vector(this.x / n, this.y / n); }
+    mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+    normalize() {
+        let m = this.mag();
+        return m > 0 ? this.div(m) : new Vector(0, 0);
+    }
+    limit(max) {
+        if (this.mag() > max) return this.normalize().mult(max);
+        return this;
+    }
+    static dist(v1, v2) {
+        return Math.sqrt(Math.pow(v1.x - v2.x, 2) + Math.pow(v1.y - v2.y, 2));
+    }
+}
+
+/**
+ * 魚の基本クラス
+ */
+class Fish {
+    constructor(x, y) {
+        this.pos = new Vector(x, y);
+        this.vel = new Vector(Math.random() * 2 - 1, Math.random() * 2 - 1);
+        this.acc = new Vector(0, 0);
+        this.maxSpeed = 4.0;
+        this.angle = 0;
+    }
+    applyForce(force) {
+        this.acc = this.acc.add(force);
+    }
+    updatePhysics() {
+        this.vel = this.vel.add(this.acc);
+        this.vel.limit(this.maxSpeed);
+        this.pos = this.pos.add(this.vel);
+        this.acc = new Vector(0, 0);
+    }
+}
+
+/**
+ * 小魚 (Boid)
+ */
+class Boid extends Fish {
+    constructor(x, y) {
+        super(x, y);
+        this.maxSpeed = 4.5;
+        this.maxForce = 0.2;
+        this.r = 6.0;
+        this.perceptionRadius = 80;
+        // 色設定
+        const hue = Math.random() * 60 + 160; 
+        this.color = `hsl(${hue}, 80%, 60%)`;
+    }
+
+    update(boids, mousePos, w, h) {
+        this.flock(boids, mousePos);
+        this.checkEdges(w, h);
+        
+        // 物理更新
+        this.vel = this.vel.add(this.acc);
+        if (this.vel.mag() > this.maxSpeed) {
+            this.vel = this.vel.normalize().mult(this.maxSpeed);
+        }
+        this.pos = this.pos.add(this.vel);
+        this.acc = new Vector(0, 0);
+
+        this.angle = Math.atan2(this.vel.y, this.vel.x);
+    }
+
+    flock(boids, mousePos) {
+        let separation = new Vector(0,0);
+        let alignment = new Vector(0,0);
+        let cohesion = new Vector(0,0);
+        let flee = new Vector(0,0);
+
+        let total = 0;
+        for (let other of boids) {
+            let d = Vector.dist(this.pos, other.pos);
+            if (other !== this && d < this.perceptionRadius) {
+                // Separation
+                if (d < this.perceptionRadius / 1.5) {
+                    let diff = this.pos.sub(other.pos).normalize().div(d);
+                    separation = separation.add(diff);
+                }
+                // Alignment
+                alignment = alignment.add(other.vel);
+                // Cohesion
+                cohesion = cohesion.add(other.pos);
+                total++;
+            }
+        }
+
+        if (total > 0) {
+            separation = separation.div(total).normalize().mult(this.maxSpeed).sub(this.vel).limit(this.maxForce);
+            alignment = alignment.div(total).normalize().mult(this.maxSpeed).sub(this.vel).limit(this.maxForce);
+            cohesion = cohesion.div(total).sub(this.pos).normalize().mult(this.maxSpeed).sub(this.vel).limit(this.maxForce);
+        }
+
+        // Mouse Flee
+        if (mousePos) {
+            let d = Vector.dist(this.pos, mousePos);
+            if (d < 200) {
+                let diff = this.pos.sub(mousePos).normalize();
+                diff = diff.mult(this.maxSpeed * 2.0);
+                let steer = diff.sub(this.vel).limit(this.maxForce * 4);
+                flee = steer;
+            }
+        }
+
+        // ウェイト調整
+        separation = separation.mult(2.0);
+        alignment = alignment.mult(1.5);
+        cohesion = cohesion.mult(1.2);
+        flee = flee.mult(4.0);
+
+        this.applyForce(separation);
+        this.applyForce(alignment);
+        this.applyForce(cohesion);
+        this.applyForce(flee);
+    }
+
+    checkEdges(w, h) {
+        const margin = 100;
+        let desired = null;
+        if (this.pos.x < margin) desired = new Vector(this.maxSpeed, this.vel.y);
+        else if (this.pos.x > w - margin) desired = new Vector(-this.maxSpeed, this.vel.y);
+        if (this.pos.y < margin) desired = new Vector(this.vel.x, this.maxSpeed);
+        else if (this.pos.y > h - margin) desired = new Vector(this.vel.x, -this.maxSpeed);
+
+        if (desired) {
+            desired = desired.normalize().mult(this.maxSpeed);
+            let steer = desired.sub(this.vel).limit(0.5);
+            this.applyForce(steer);
+        }
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        ctx.rotate(this.angle);
+        ctx.beginPath();
+        ctx.moveTo(this.r * 2, 0);
+        ctx.lineTo(-this.r, -this.r + 3);
+        ctx.lineTo(-this.r, this.r - 3);
+        ctx.fillStyle = this.color;
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
+/**
+ * ボス魚
+ */
+class BossFish extends Fish {
+    constructor(x, y) {
+        super(x, y);
+        this.r = 20.0;
+        this.baseMaxSpeed = 3.5;
+        this.maxSpeed = this.baseMaxSpeed;
+        this.maxForce = 0.25;
+        this.angle = 0;
+        this.scale = 1.0;
+        this.targetScale = 1.0;
+        this.eatenCount = 0;
+    }
+
+    update(boids, w, h) {
+        // 狩り
+        let closest = null;
+        let recordDist = Infinity;
+        for (let boid of boids) {
+            let d = Vector.dist(this.pos, boid.pos);
+            if (d < recordDist) {
+                recordDist = d;
+                closest = boid;
+            }
+        }
+        if (closest) {
+            let desired = closest.pos.sub(this.pos).normalize().mult(this.maxSpeed);
+            let steer = desired.sub(this.vel).limit(this.maxForce);
+            this.applyForce(steer);
+
+            if (recordDist < this.r + closest.r) {
+                // 捕食
+                const idx = boids.indexOf(closest);
+                if (idx > -1) {
+                    boids.splice(idx, 1);
+                    createParticles(closest.pos.x, closest.pos.y, '255, 60, 60', 12);
+                    this.eatenCount++;
+                    this.r += 0.6;
+                    this.maxSpeed = Math.max(1.8, this.baseMaxSpeed - (this.eatenCount * 0.04));
+                    this.scale = 1.25;
+                    this.targetScale = 1.0;
+                    updateStats();
+                }
+            }
+        }
+
+        // 壁制御
+        const margin = 100;
+        let desired = null;
+        if (this.pos.x < margin) desired = new Vector(this.maxSpeed, this.vel.y);
+        else if (this.pos.x > w - margin) desired = new Vector(-this.maxSpeed, this.vel.y);
+        if (this.pos.y < margin) desired = new Vector(this.vel.x, this.maxSpeed);
+        else if (this.pos.y > h - margin) desired = new Vector(this.vel.x, -this.maxSpeed);
+        
+        if (desired) {
+            desired = desired.normalize().mult(this.maxSpeed);
+            let steer = desired.sub(this.vel).limit(0.5);
+            this.applyForce(steer);
+        }
+
+        // 物理
+        this.vel = this.vel.add(this.acc);
+        this.vel.limit(this.maxSpeed);
+        this.pos = this.pos.add(this.vel);
+        this.acc = new Vector(0, 0);
+
+        // 振り返りアニメーション
+        let targetAngle = Math.atan2(this.vel.y, this.vel.x);
+        let diff = targetAngle - this.angle;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        this.angle += diff * 0.1;
+
+        // ボヨヨン
+        this.scale += (this.targetScale - this.scale) * 0.15;
+        if (Math.abs(this.targetScale - this.scale) < 0.01) this.targetScale = 1.0;
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.pos.x, this.pos.y);
+        ctx.rotate(this.angle);
+        ctx.scale(this.scale, this.scale);
+
+        let grad = ctx.createRadialGradient(-5, -5, 0, 0, 0, this.r);
+        grad.addColorStop(0, '#ff6666');
+        grad.addColorStop(1, '#cc0000');
+        
+        ctx.beginPath();
+        ctx.ellipse(0, 0, this.r * 2, this.r, 0, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = "rgba(255, 0, 0, 0.5)";
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        
+        // 目
+        ctx.beginPath();
+        ctx.arc(this.r, -this.r/3, this.r/3.5, 0, Math.PI*2);
+        ctx.fillStyle = 'white';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(this.r + this.r/8, -this.r/3, this.r/8, 0, Math.PI*2);
+        ctx.fillStyle = 'black';
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
+/**
+ * エフェクト関連
+ */
+let particles = [];
+let bubbles = [];
+
+function createParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+        particles.push({
+            pos: new Vector(x, y),
+            vel: new Vector(Math.random()*4-2, Math.random()*4-2),
+            color: color,
+            alpha: 1.0,
+            size: Math.random()*3+2
+        });
+    }
+}
+
+// ===========================
+// メイン制御
+// ===========================
+let canvas, ctx;
+let width, height;
+let flock = [];
+let boss = null;
+let mousePos = null;
+let isGameOver = false;
+
+function init() {
+    console.log("Initializing Simulation...");
+    
+    canvas = document.getElementById('world');
+    if (!canvas) {
+        console.error("Canvas not found!");
+        return;
+    }
+    ctx = canvas.getContext('2d');
+    
+    // イベントリスナー
+    window.addEventListener('resize', resize);
+    
+    canvas.addEventListener('mousemove', e => {
+        mousePos = new Vector(e.clientX, e.clientY);
+    });
+    canvas.addEventListener('touchmove', e => {
+        e.preventDefault();
+        mousePos = new Vector(e.touches[0].clientX, e.touches[0].clientY);
+    }, {passive: false});
+    canvas.addEventListener('mouseleave', () => mousePos = null);
+    canvas.addEventListener('touchend', () => mousePos = null);
+    
+    document.getElementById('restart-btn').addEventListener('click', resetGame);
+
+    resize();
+    resetGame();
+    animate();
+    
+    console.log("Simulation Started.");
+}
+
+function resize() {
+    width = window.innerWidth || 800; // フォールバック
+    height = window.innerHeight || 600;
+    canvas.width = width;
+    canvas.height = height;
+}
+
+function resetGame() {
+    isGameOver = false;
+    document.getElementById('restart-container').style.display = 'none';
+    flock = [];
+    particles = [];
+    bubbles = [];
+    
+    // 小魚生成
+    for (let i = 0; i < 120; i++) {
+        flock.push(new Boid(Math.random() * width, Math.random() * height));
+    }
+    // 気泡生成
+    for (let i = 0; i < 50; i++) {
+        bubbles.push({
+            pos: new Vector(Math.random() * width, Math.random() * height),
+            vel: new Vector(0, Math.random() * -1 - 0.5),
+            size: Math.random() * 3 + 1,
+            wobble: Math.random() * Math.PI * 2,
+            alpha: Math.random() * 0.3 + 0.1
+        });
+    }
+    // ボス
+    boss = new BossFish(width / 2, height / 2);
+    updateStats();
+}
+
+function updateStats() {
+    document.getElementById('fish-count').textContent = flock.length;
+    document.getElementById('boss-size').textContent = boss ? Math.round(boss.r) : 0;
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+
+    // 背景クリア（残像）
+    ctx.fillStyle = 'rgba(15, 21, 32, 0.3)';
+    ctx.fillRect(0, 0, width, height);
+
+    // 気泡
+    for (let b of bubbles) {
+        b.pos.y += b.vel.y;
+        b.wobble += 0.05;
+        b.pos.x += Math.sin(b.wobble) * 0.5;
+        if (b.pos.y < -10) {
+            b.pos.y = height + 10;
+            b.pos.x = Math.random() * width;
+        }
+        ctx.fillStyle = `rgba(100, 150, 255, ${b.alpha})`;
+        ctx.beginPath();
+        ctx.arc(b.pos.x, b.pos.y, b.size, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // パーティクル
+    for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.pos = p.pos.add(p.vel);
+        p.vel = p.vel.mult(0.95);
+        p.alpha -= 0.03;
+        
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = `rgb(${p.color})`;
+        ctx.beginPath();
+        ctx.arc(p.pos.x, p.pos.y, p.size, 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+        
+        if (p.alpha <= 0) particles.splice(i, 1);
+    }
+
+    // 小魚
+    for (let boid of flock) {
+        boid.update(flock, mousePos, width, height);
+        boid.draw(ctx);
+    }
+
+    // ボス
+    if (boss && flock.length > 0) {
+        boss.update(flock, width, height);
+        boss.draw(ctx);
+    } else if (flock.length === 0 && !isGameOver) {
+        isGameOver = true;
+        document.getElementById('restart-container').style.display = 'block';
+    } else if (isGameOver && boss) {
+        // 勝利時の徘徊
+        boss.update([], width, height);
+        boss.draw(ctx);
+    }
+}
+
+// ページの読み込み完了を待ってから開始
+window.addEventListener('load', init);
+
+</script>
+</body>
+</html>
